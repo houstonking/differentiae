@@ -64,7 +64,7 @@
       (update :internal-buffer conj (cb/change-batch))
       (update :produced-buffer conj (cb/change-batch))))
 
-(defn set-external-summary
+#_(defn set-external-summary
   [{:as operator-state :keys [inputs external external-buffer operator]}
    summaries capabilities]
   (cond-> (reduce

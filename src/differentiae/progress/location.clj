@@ -6,5 +6,8 @@
   (throw (ex-info "NYI"))
   #_(Location. (:index target) ))
 
-(defn new-source [node port]
+(defn source [node port]
   (Location. node port :source))
+
+(defn target [node port]
+  (Location. node port :target))

@@ -16,6 +16,7 @@
     (boolean (some #(po/less-equal % element) elements))))
 
 (defn insert [ac element]
+  (println (format "inserting %s into %s" element ac))
   (if-not (some #(po/less-equal % element) (:elements ac))
     (-> ac
         (update :elements (partial filter #(not (po/less-equal element %))))

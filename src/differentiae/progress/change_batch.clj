@@ -1,24 +1,32 @@
-(ns differentiae.progress.change-batch)
+(ns differentiae.progress.change-batch
+  (:refer-clojure :exclude [update]))
 
-(defrecord ChangeBatch [updates clean])
-
-(defn update [change-batch k v]
-  (update change-batch :updates conj [k v]))
+(defn update [change-batch value delta]    
+  (merge-with + change-batch {value delta}))
 
 (defn change-batch
-  ([] (->ChangeBatch [] 0))
-  ([k v] (update (change-batch) k v)))
+  ([] (->ChangeBatch {}))
+  ([value delta] (update! (change-batch) {value delta})))
 
-(defn dirty? [change-batch]
+(defn dirty? [change-batch]  
   (> (count (:updates change-batch))
      (:clean change-batch)))
 
-(defn extend [change-batch coll]
-  (reduce update change-batch coll))
+(defn extend! [change-batch coll]
+  (reduce (fn [cb [k v]] (update! cb k v)) change-batch coll))
 
 (defn into-inner [change-batch]
   (throw (ex-info "NYI")))
 
-(defn drain! [cb-atom] )
+(defn compact [{:keys [updates clean]}]
+  (->> (sort-by first updates)
+       )
+  )
+
+(defn drain! [change-batch]
+  (let [[pre post] (swap-vals! (:state change-batch)
+                               (constantly base-state))
+        {:keys [updates]} pre]
+    (compact pre)))
 
 (defn drain-into! [cb-atom-1 cb-atom-2])

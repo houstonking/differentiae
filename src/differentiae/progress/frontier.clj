@@ -15,8 +15,7 @@
   (less-equal [this element]
     (boolean (some #(po/less-equal % element) elements))))
 
-(defn insert [ac element]
-  (println (format "inserting %s into %s" element ac))
+(defn insert [ac element]  
   (if-not (some #(po/less-equal % element) (:elements ac))
     (-> ac
         (update :elements (partial filter #(not (po/less-equal element %))))
@@ -28,6 +27,9 @@
   [ac-atom element]
   (let [[before after] (swap-vals! ac-atom insert element)]
     (not= before after)))
+
+(defn elements [ac-atom]
+  (-> ac-atom deref :elements))
 
 (defn antichain
   ([] (->AntichainImpl []))
@@ -42,12 +44,14 @@
   (empty! [ma])
   (update-dirty! [ma time delta])
   (frontier [ma] "Yields an immutable antichain of the minimal elements with positive count.")
-  (is-empty? [ma])
-  (apply-updates! [ma updates])
-  (apply-updates-and! [ma updates f])
-  (rebuild-and! [ma f]))
+  (is-empty? [ma])  
+  
+  (update-iter! [ma updates])
+  (rebuild! [ma changes])
+  (consolidate-updates! [ma])
+  )
 
-;; TODO: gross imperative mutable nonsense. Simplify, but keep efficient
+;; Todo: gross imperative mutable nonsense. Simplify, but keep efficient
 ;;       batching behavior?
 (deftype MutableAntichainImpl [^:volatile-mutable dirty
                                ^:volatile-mutable updates
@@ -78,13 +82,11 @@
   (is-empty? [this]
     (assert (= 0 dirty))
     (empty? frontier))
-
-  (apply-updates! [this new-updates]
-    (apply-updates-and! this new-updates (constantly nil)))
-
-  (apply-updates-and! [this new-updates f]
+  
+  (update-iter! [this new-updates]    
     (set! updates (into updates new-updates))
     (set! dirty (+ dirty (count new-updates)))
+
     (let [rebuild-required (atom false)]
       (while (and (> dirty 0) (not @rebuild-required))
         (let [[time delta] (nth updates (- (count updates) dirty))
@@ -96,31 +98,43 @@
                                 (and (< delta 0) before-frontier)))))
           (set! dirty (dec dirty))))
       (set! dirty 0)
-      (if @rebuild-required
-        (rebuild-and! this f))))
+      (let [changes (cb/change-batch)]
+        (if @rebuild-required
+          (rebuild! this changes)
+          changes))))
 
-  (rebuild-and! [this f]
-    (if-not (empty? updates)
-      (let [grouped-updates (group-by first updates)
-            counts (map (partial reduce (fn [total [_ delta]] (+ total delta)) 0) (vals grouped-updates))
-            updates' (->> (map vector (keys grouped-updates) counts)
-                          (filter (fn [[_ x]] (not= 0 x)))
-                          (sort))]
-        (set! updates updates')
-        (doseq [update (filter (comp pos? second) updates)]
-          (if-not (some (fn [x] (po/less-equal x (first update))) frontier-temp)
-            (set! frontier-temp (conj frontier-temp (first update)))))
+  (consolidate-updates! [this]    
+    (let [grouped-updates (group-by first updates)
+          consolidated-updates  
+          (for [[time updates] grouped-updates
+                :let [delta (reduce + (map second updates))]
+                :when (not (zero? delta))]
+            [time delta])]
+      (set! updates consolidated-updates)))
+  
+  (rebuild! [this changes]    
+    (consolidate-updates! this)
 
-        (doseq [time frontier]
-          (if-not (some (partial = time) frontier-temp)
-            (f time -1)))
+    ;; seed the reported changes with the absence of the current frontier
+    (doseq [t frontier]
+      (cb/update! changes t -1))
 
-        (doseq [time frontier-temp]
-          (if-not (some (partial = time) frontier)
-            (f time 1)))
+    ;; rebuild the frontier using the updates with positive occurrence     
+    (let [new-frontier
+          (reduce (fn [new-frontier [time delta]]                    
+                    (if-not (some #(po/less-equal % time) new-frontier)
+                      (conj new-frontier time)
+                      new-frontier))
+                  []
+                  (sort (filter (comp pos? second) updates)))]
 
-        (set! frontier frontier-temp)
-        (set! frontier-temp []))))
+      (set! frontier new-frontier)
+      
+      ;; add in the new frontier elements
+      (doseq [t new-frontier]
+        (cb/update! changes t 1)))
+    
+    (remove (comp zero? second) @changes))
 
   po/PartialOrder
   (less-than [this element]

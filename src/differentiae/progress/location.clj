@@ -1,6 +1,9 @@
 (ns differentiae.progress.location)
 
-(defrecord Location [node port type])
+(defrecord Location [node port type]
+  java.lang.Comparable
+  (compareTo [this that]
+    (.compareTo that [node port type])))
 
 (defn from [target]
   (throw (ex-info "NYI"))

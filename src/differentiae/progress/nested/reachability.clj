@@ -12,7 +12,8 @@
 
 (defrecord PortInformation [pointstamps implications output-summaries])
 
-(defn port-information [] (map->PortInformation {}))
+(defn port-information [] (map->PortInformation {:pointstamps (ft/mutable-antichain)
+                                                 :implications (ft/mutable-antichain)}))
 
 ;;;;;;;;;;;;;;;;;;
 ;; PER OPERATOR ;;
@@ -43,25 +44,88 @@
 
 
 (defn- accumulate-target-changes! [{:as tracker
-                                    :keys [target-changes]}]
+                                    :keys [target-changes]}]  
+  tracker)
+
+(defn- accumulate-source-changes! [{:as tracker
+                                    :keys [source-changes]}]  
   (reduce
-   (fn [tracker [[target time] diff]]
-     (let [operator (-> tracker :per-operator (get (:node target)) :targets (:port target))]
-       (println operator)
-       tracker
-       )
-     )
-   
+   (fn [tracker [[source time] diff]]
+     (let [operator (-> tracker :per-operator (get (:node source)) :sources (get (:port source)))
+           changes (ft/update-iter! (-> operator :pointstamps) [[time diff]])]
+       (reduce
+        (fn [{:as tracker
+              :keys []}
+             [time diff]]
+          (let [tracker (reduce (fn [{:as tracker :keys [output-changes worklist]} [output summaries]]
+                                  (doseq [summary summaries
+                                          :let [out-time (ts/results-in summary time)]]
+                                    (cb/update! (get output-changes output) out-time diff)))
+                                tracker
+                                (-> operator :output-summaries enumerate))]
+
+            
+            (-> tracker
+                (update :total-counts (fnil + 0) diff)
+                (update :worklist conj [time source diff]))))
+        tracker
+        changes)))
    tracker
-   (cb/drain! target-changes)))
+   (cb/drain! source-changes)))
 
-(defn- accumulate-source-changes! [tracker])
-(defn- propagate-changes! [tracker])
+(defn rcompare [x y] (compare y x))
 
-(defn propagate-all! [tracker]
+(defn- propagate-changes! [{:as tracker :keys [worklist]}]  
+  (loop [[[time location diff :as work] & cur-work :as all-work] worklist]        
+    (when work      
+      (if (zero? diff)
+        (recur cur-work)
+        (if (loc/target? location)                    
+          (let [changes (-> tracker
+                            :per-operator
+                            (get (:node location))
+                            :targets
+                            (get (:port location))
+                            :implications
+                            (ft/update-iter! [[time diff]]))                
+                nodes (-> tracker :nodes (get (:node location)) (get (:port location)))
+                new-work (doall (for [[time diff] changes
+                                      [output-port summaries] (-> tracker
+                                                                  :nodes
+                                                                  (get (:node location))
+                                                                  (get (:port location))
+                                                                  enumerate)
+                                      :let [source (loc/source (:node location) output-port)]
+                                      summary (:elements summaries)]                                    
+                                  (let [new-time (ts/results-in summary time)]
+                                    (update tracker :pushed-changes cb/update! [location time] diff)
+                                    [new-time source diff])))]              
+            (recur (into (sorted-set) (concat cur-work new-work))))
+          (let [changes (-> tracker
+                            :per-operator
+                            (get (:node location))
+                            :sources
+                            (get (:port location))
+                            :implications
+                            (ft/update-iter! [[time diff]]))
+                new-work (doall (for [[time diff] changes
+                                      target (-> tracker
+                                                 :edges
+                                                 (get (:node location))
+                                                 (get (:port location)))]
+                                  (do (update tracker :pushed-changes cb/update! [location time] diff)
+                                      [time target diff])))]            
+            (recur (into (sorted-set) (concat cur-work new-work))))))))
+  tracker)
+
+(defn propagate-all! [tracker]  
   (-> tracker accumulate-target-changes! accumulate-source-changes! propagate-changes!))
 
-(defn pushed [tracker])
+(defn drain-pushed! [{:as tracker :keys [pushed-changes]}]
+  (cb/drain! pushed-changes))
+
+(defn pushed [{:as tracker :keys [pushed-changes]}]
+  pushed-changes)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; REACHABILITY BUILDER ;;
@@ -117,8 +181,7 @@
          init-work (doall (for [output outputs]
                             [output (:port output) 0 #_ts/default-summary]))]      ; TODO: see if we can come up with a better pattern for default timestamps wrt types
      (loop [results {}
-            [work & work-rest :as all-work] init-work]
-       (clojure.pprint/pprint ["loop:" results all-work])
+            [work & work-rest :as all-work] init-work]       
        (if (nil? work)
          results
          (let [[location output summary] work]
@@ -132,13 +195,11 @@
                       (let [location (loc/target (:node location) input-port)]
                         (reduce
                          (fn [[results work] operator-summary]                                                      
-                           (let [combined (ts/followed-by operator-summary summary)
-                                 _ (println operator-summary summary combined)
+                           (let [combined (ts/followed-by operator-summary summary)                                 
                                  cur-antichains (get results location {})
                                  updated-antichains (update cur-antichains output
                                                             (fnil ft/insert (ft/antichain)) combined)
                                  inserted? (not= cur-antichains updated-antichains)]
-                             (println "cur:" cur-antichains)
                              [(assoc results location updated-antichains)
                               (if inserted?
                                 (concat work-rest [[location output combined]])
@@ -162,13 +223,10 @@
                (recur results work-rest)))))))))
 
 (defn build! [builder]
-  
-  (let [b @builder
-        _ (clojure.pprint/pprint b)
+  (let [b @builder        
         per-ops (into {} (map (fn [[i [inputs outputs]]]
                                 [i (per-operator inputs outputs)])
-                              (-> b :shape)))
-        
+                              (-> b :shape)))        
         builder-summary (vec (repeat (get-in b [:shape 0 1]) []))
         output-summaries (summarize-outputs (:nodes b) (:edges b))
         [builder-summary per-ops]
@@ -183,23 +241,27 @@
                      per-ops rst)
               (recur builder-summary
                      (if (loc/target? location)
-                       (update-in per-ops [(:node location) :targets (:port location) :output-summaries] (constantly summaries))
-                       (update-in per-ops [(:node location) :sources (:port location) :output-summaries] (constantly summaries)))               
-                     rst))))
-        
+                       (update-in per-ops [(:node location)
+                                           :targets
+                                           (:port location)
+                                           :output-summaries]
+                                  (constantly summaries))
+                       (update-in per-ops [(:node location)
+                                           :sources
+                                           (:port location)
+                                           :output-summaries]
+                                  (constantly summaries)))                     
+                     rst))))        
         scope-outputs (get-in b [:shape 0 0])        
-        output-changes (vec (repeat scope-outputs (cb/change-batch)))]
-    
+        output-changes (vec (repeat scope-outputs (cb/change-batch)))]    
     [(map->Tracker
       {:nodes (-> b :nodes)
        :edges (-> b :edges)
        :per-operator per-ops
        :target-changes (cb/change-batch)
        :source-changes (cb/change-batch)
-       :worklist ()
+       :worklist (sorted-set)
        :pushed-changes (cb/change-batch)
-       :total-coutputs 0}
-      )
-     builder-summary]
-    ))
+       :total-outputs 0})
+     builder-summary]))
 

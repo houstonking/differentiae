@@ -1,4 +1,4 @@
-(ns differentiae.worker2
+(ns differentiae.worker
   (:require [differentiae.communication.allocator.protocols :as p]
             [differentiae.progress.nested.subgraph :as sg]
             [differentiae.progress.operate :as op]

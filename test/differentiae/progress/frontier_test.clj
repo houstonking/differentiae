@@ -7,13 +7,16 @@
     (is (is-empty? ma)))
 
   (let [ma (mutable-antichain 1)]
-    (apply-updates! ma [[1 -1] [2 1]])
+
+    (is (= (update-iter! ma [[1 -1] [2 1]])
+           [[1, -1], [2, 1]]))
+
     (is (= (frontier ma) (->AntichainImpl [2]))))
 
-  (let [ma (mutable-antichain 1)
+  #_(let [ma (mutable-antichain 1)
         changes (atom [])]
     (apply-updates-and! ma
                         [[1, -1] [2, 1]]
                         (fn [time diff] (swap! changes conj [time diff])))
-    (is (= [[1, -1], [2, 1]] @changes))))
+    (is (= ))))
 
